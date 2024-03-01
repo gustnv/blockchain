@@ -45,6 +45,15 @@ func (tx Transaction) Serialize() []byte {
 	return encoded.Bytes()
 }
 
+func DeserializeTransaction(data []byte) Transaction {
+	var transaction Transaction
+
+	decoder := gob.NewDecoder(bytes.NewReader(data))
+	err := decoder.Decode(&transaction)
+	Handle(err)
+	return transaction
+}
+
 func CoinbaseTx(to, data string) *Transaction {
 	if data == "" {
 		randData := make([]byte, 24)
@@ -62,13 +71,10 @@ func CoinbaseTx(to, data string) *Transaction {
 	return &tx
 }
 
-func NewTransaction(from, to string, amount int, UTXO *UTXOSet) *Transaction {
+func NewTransaction(w *wallet.Wallet, to string, amount int, UTXO *UTXOSet) *Transaction {
 	var inputs []TxInput
 	var outputs []TxOutput
 
-	wallets, err := wallet.CreateWallets()
-	Handle(err)
-	w := wallets.GetWallet(from)
 	pubKeyHash := wallet.PublicKeyHash(w.PublicKey)
 	acc, validOutputs := UTXO.FindSpendableOutputs(pubKeyHash, amount)
 
@@ -85,6 +91,8 @@ func NewTransaction(from, to string, amount int, UTXO *UTXOSet) *Transaction {
 			inputs = append(inputs, input)
 		}
 	}
+
+	from := string(w.Address())
 
 	outputs = append(outputs, *NewTXOutput(amount, to))
 
@@ -124,14 +132,13 @@ func (tx *Transaction) Sign(privKey []byte, prevTXs map[string]Transaction) {
 		txCopy.Inputs[inId].PubKey = nil
 
 		curve := elliptic.P256()
-        d := new(big.Int).SetBytes(privKey)
-        privKeyEcdsa := ecdsa.PrivateKey{
-            PublicKey: ecdsa.PublicKey{
-                Curve: curve,
-            },
-            D: d,
-        }
-
+		d := new(big.Int).SetBytes(privKey)
+		privKeyEcdsa := ecdsa.PrivateKey{
+			PublicKey: ecdsa.PublicKey{
+				Curve: curve,
+			},
+			D: d,
+		}
 
 		r, s, err := ecdsa.Sign(rand.Reader, &privKeyEcdsa, txCopy.ID)
 		Handle(err)
@@ -176,7 +183,7 @@ func (tx *Transaction) Verify(prevTXs map[string]Transaction) bool {
 		x.SetBytes(in.PubKey[:(keyLen / 2)])
 		y.SetBytes(in.PubKey[(keyLen / 2):])
 
-		rawPubKey := ecdsa.PublicKey{Curve: curve, X: &x,Y: &y}
+		rawPubKey := ecdsa.PublicKey{Curve: curve, X: &x, Y: &y}
 		if !ecdsa.Verify(&rawPubKey, txCopy.ID, &r, &s) {
 			return false
 		}
