@@ -2,9 +2,9 @@ package blockchain
 
 import (
 	"bytes"
-	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/gob"
 	"encoding/hex"
@@ -13,23 +13,13 @@ import (
 	"math/big"
 	"strings"
 
-	"github.com/gustnv/blockchain_project/wallet"
+	"github.com/tensor-programming/golang-blockchain/wallet"
 )
 
 type Transaction struct {
 	ID      []byte
 	Inputs  []TxInput
 	Outputs []TxOutput
-}
-
-func (tx Transaction) Serialize() []byte {
-	var encoded bytes.Buffer
-
-	encoder := gob.NewEncoder(&encoded)
-	err := encoder.Encode(tx)
-	Handle(err)
-
-	return encoded.Bytes()
 }
 
 func (tx *Transaction) Hash() []byte {
@@ -43,33 +33,36 @@ func (tx *Transaction) Hash() []byte {
 	return hash[:]
 }
 
-func (tx *Transaction) SetID() {
+func (tx Transaction) Serialize() []byte {
 	var encoded bytes.Buffer
-	var hash [32]byte
 
-	encode := gob.NewEncoder(&encoded)
-	err := encode.Encode(tx)
-	Handle(err)
+	enc := gob.NewEncoder(&encoded)
+	err := enc.Encode(tx)
+	if err != nil {
+		log.Panic(err)
+	}
 
-	hash = sha256.Sum256(encoded.Bytes())
-	tx.ID = hash[:]
+	return encoded.Bytes()
 }
 
 func CoinbaseTx(to, data string) *Transaction {
 	if data == "" {
-		data = fmt.Sprintf("Coins to %s", to)
+		randData := make([]byte, 24)
+		_, err := rand.Read(randData)
+		Handle(err)
+		data = fmt.Sprintf("%x", randData)
 	}
 
 	txin := TxInput{[]byte{}, -1, nil, []byte(data)}
-	txout := NewTxOutput(100, to)
+	txout := NewTXOutput(20, to)
 
 	tx := Transaction{nil, []TxInput{txin}, []TxOutput{*txout}}
-	tx.SetID()
+	tx.ID = tx.Hash()
 
 	return &tx
 }
 
-func NewTransaction(from, to string, amount int, chain *BlockChain) *Transaction {
+func NewTransaction(from, to string, amount int, UTXO *UTXOSet) *Transaction {
 	var inputs []TxInput
 	var outputs []TxOutput
 
@@ -77,8 +70,7 @@ func NewTransaction(from, to string, amount int, chain *BlockChain) *Transaction
 	Handle(err)
 	w := wallets.GetWallet(from)
 	pubKeyHash := wallet.PublicKeyHash(w.PublicKey)
-
-	acc, validOutputs := chain.FindSpendableOutputs(pubKeyHash, amount)
+	acc, validOutputs := UTXO.FindSpendableOutputs(pubKeyHash, amount)
 
 	if acc < amount {
 		log.Panic("Error: not enough funds")
@@ -94,42 +86,24 @@ func NewTransaction(from, to string, amount int, chain *BlockChain) *Transaction
 		}
 	}
 
-	outputs = append(outputs, *NewTxOutput(amount, to))
+	outputs = append(outputs, *NewTXOutput(amount, to))
 
 	if acc > amount {
-		outputs = append(outputs, *NewTxOutput(acc-amount, from))
+		outputs = append(outputs, *NewTXOutput(acc-amount, from))
 	}
 
 	tx := Transaction{nil, inputs, outputs}
 	tx.ID = tx.Hash()
-	chain.SignTransaction(&tx, w.PrivateKey)
+	UTXO.Blockchain.SignTransaction(&tx, w.PrivateKey)
 
 	return &tx
-
 }
 
 func (tx *Transaction) IsCoinbase() bool {
 	return len(tx.Inputs) == 1 && len(tx.Inputs[0].ID) == 0 && tx.Inputs[0].Out == -1
 }
 
-func (tx *Transaction) TrimmedCopy() Transaction {
-	var inputs []TxInput
-	var outputs []TxOutput
-
-	for _, in := range tx.Inputs {
-		inputs = append(inputs, TxInput{in.ID, in.Out, nil, nil})
-	}
-
-	for _, out := range tx.Outputs {
-		outputs = append(outputs, TxOutput{out.Value, out.PubKeyHash})
-	}
-
-	txCopy := Transaction{tx.ID, inputs, outputs}
-
-	return txCopy
-}
-
-func (tx *Transaction) Sign(privKey *rsa.PrivateKey, prevTXs map[string]Transaction) {
+func (tx *Transaction) Sign(privKey []byte, prevTXs map[string]Transaction) {
 	if tx.IsCoinbase() {
 		return
 	}
@@ -149,14 +123,22 @@ func (tx *Transaction) Sign(privKey *rsa.PrivateKey, prevTXs map[string]Transact
 		txCopy.ID = txCopy.Hash()
 		txCopy.Inputs[inId].PubKey = nil
 
-		hasher := sha256.New()
-		hasher.Write(txCopy.ID)
-		hashedMessage := hasher.Sum(nil)
+		curve := elliptic.P256()
+        d := new(big.Int).SetBytes(privKey)
+        privKeyEcdsa := ecdsa.PrivateKey{
+            PublicKey: ecdsa.PublicKey{
+                Curve: curve,
+            },
+            D: d,
+        }
 
-		signature, err := rsa.SignPKCS1v15(rand.Reader, privKey, crypto.SHA256, hashedMessage)
+
+		r, s, err := ecdsa.Sign(rand.Reader, &privKeyEcdsa, txCopy.ID)
 		Handle(err)
+		signature := append(r.Bytes(), s.Bytes()...)
 
 		tx.Inputs[inId].Signature = signature
+
 	}
 }
 
@@ -172,6 +154,7 @@ func (tx *Transaction) Verify(prevTXs map[string]Transaction) bool {
 	}
 
 	txCopy := tx.TrimmedCopy()
+	curve := elliptic.P256()
 
 	for inId, in := range tx.Inputs {
 		prevTx := prevTXs[hex.EncodeToString(in.ID)]
@@ -180,22 +163,43 @@ func (tx *Transaction) Verify(prevTXs map[string]Transaction) bool {
 		txCopy.ID = txCopy.Hash()
 		txCopy.Inputs[inId].PubKey = nil
 
-		hasher := sha256.New()
-		hasher.Write(txCopy.ID)
-		hashedMessage := hasher.Sum(nil)
+		r := big.Int{}
+		s := big.Int{}
 
-		pubKey := &rsa.PublicKey{
-			N: big.NewInt(0).SetBytes(prevTx.Outputs[in.Out].PubKeyHash),
-			E: 65537,
-		}
+		sigLen := len(in.Signature)
+		r.SetBytes(in.Signature[:(sigLen / 2)])
+		s.SetBytes(in.Signature[(sigLen / 2):])
 
-		err := rsa.VerifyPKCS1v15(pubKey, crypto.SHA256, hashedMessage, in.Signature)
-		if err != nil {
+		x := big.Int{}
+		y := big.Int{}
+		keyLen := len(in.PubKey)
+		x.SetBytes(in.PubKey[:(keyLen / 2)])
+		y.SetBytes(in.PubKey[(keyLen / 2):])
+
+		rawPubKey := ecdsa.PublicKey{Curve: curve, X: &x,Y: &y}
+		if !ecdsa.Verify(&rawPubKey, txCopy.ID, &r, &s) {
 			return false
 		}
 	}
 
 	return true
+}
+
+func (tx *Transaction) TrimmedCopy() Transaction {
+	var inputs []TxInput
+	var outputs []TxOutput
+
+	for _, in := range tx.Inputs {
+		inputs = append(inputs, TxInput{in.ID, in.Out, nil, nil})
+	}
+
+	for _, out := range tx.Outputs {
+		outputs = append(outputs, TxOutput{out.Value, out.PubKeyHash})
+	}
+
+	txCopy := Transaction{tx.ID, inputs, outputs}
+
+	return txCopy
 }
 
 func (tx Transaction) String() string {

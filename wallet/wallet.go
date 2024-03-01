@@ -2,33 +2,76 @@ package wallet
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/rsa"
 	"crypto/sha256"
-	"encoding/binary"
 	"log"
+
+	"golang.org/x/crypto/ripemd160"
+)
+
+const (
+	checksumLength = 4
+	version        = byte(0x00)
 )
 
 type Wallet struct {
-	PrivateKey *rsa.PrivateKey
-	PublicKey  []byte
+    PrivateKey []byte 
+    PublicKey  []byte
 }
 
-const (
-	version        = byte(0x00)
-	checksumLength = 4
-)
-
 func (w Wallet) Address() []byte {
-	pubKeyHash := PublicKeyHash(w.PublicKey)
+	pubHash := PublicKeyHash(w.PublicKey)
 
-	versionedHash := append([]byte{version}, pubKeyHash...)
+	versionedHash := append([]byte{version}, pubHash...)
 	checksum := Checksum(versionedHash)
 
 	fullHash := append(versionedHash, checksum...)
 	address := Base58Encode(fullHash)
 
 	return address
+}
+
+func NewKeyPair() ([]byte, []byte) {
+    curve := elliptic.P256()
+    private, err := ecdsa.GenerateKey(curve, rand.Reader)
+    if err != nil {
+        log.Panic(err)
+    }
+
+    privBytes := private.D.Bytes()
+    pub := append(private.PublicKey.X.Bytes(), private.PublicKey.Y.Bytes()...)
+
+    return privBytes, pub 
+}
+
+func MakeWallet() *Wallet {
+    privKey, pubKey := NewKeyPair()
+    wallet := Wallet{privKey, pubKey}
+
+    return &wallet
+}
+
+func PublicKeyHash(pubKey []byte) []byte {
+	pubHash := sha256.Sum256(pubKey)
+
+	hasher := ripemd160.New()
+	_, err := hasher.Write(pubHash[:])
+	if err != nil {
+		log.Panic(err)
+	}
+
+	publicRipMD := hasher.Sum(nil)
+
+	return publicRipMD
+}
+
+func Checksum(payload []byte) []byte {
+	firstHash := sha256.Sum256(payload)
+	secondHash := sha256.Sum256(firstHash[:])
+
+	return secondHash[:checksumLength]
 }
 
 func ValidateAddress(address string) bool {
@@ -39,39 +82,4 @@ func ValidateAddress(address string) bool {
 	targetChecksum := Checksum(append([]byte{version}, pubKeyHash...))
 
 	return bytes.Equal(actualChecksum, targetChecksum)
-}
-
-func NewKeyPair() (*rsa.PrivateKey, *rsa.PublicKey) {
-	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		log.Panic(err)
-	}
-	return privateKey, &privateKey.PublicKey
-}
-
-func MakeWallet() *Wallet {
-	privateKey, publicKey := NewKeyPair()
-	publicKeyBytes := PublicKeyToBytes(publicKey)
-	wallet := Wallet{privateKey, publicKeyBytes}
-	return &wallet
-}
-
-func PublicKeyToBytes(pubKey *rsa.PublicKey) []byte {
-    eBytes := make([]byte, 8)
-    binary.BigEndian.PutUint64(eBytes, uint64(pubKey.E))
-
-    keyBytes := append(pubKey.N.Bytes(), eBytes...)
-
-    return keyBytes
-}
-
-func PublicKeyHash(pubKey []byte) []byte {
-	hash := sha256.Sum256(pubKey)
-	return hash[:]
-}
-
-func Checksum(payload []byte) []byte {
-	firstSHA := sha256.Sum256(payload)
-	secondSHA := sha256.Sum256(firstSHA[:])
-	return secondSHA[:checksumLength]
 }

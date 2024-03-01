@@ -3,16 +3,11 @@ package main
 import (
 	"os"
 
-	"github.com/gustnv/blockchain_project/cli"
-	"github.com/gustnv/blockchain_project/wallet"
+	"github.com/tensor-programming/golang-blockchain/cli"
 )
 
 func main() {
 	defer os.Exit(0)
-	cli := cli.CommandLine{}
-	cli.Run()
-
-	wallet := wallet.MakeWallet()
-	wallet.Address()
-	
+	cmd := cli.CommandLine{}
+	cmd.Run()
 }
